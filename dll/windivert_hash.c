@@ -60,6 +60,9 @@
  *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
  */
 
+#include <windows.h>
+#include "windivert.h"
+
 /*
  * This is a modified version of the 64bit xxHash algorithm:
  * - The algorithm is seeded with packet data rather than the single 64bit

@@ -52,12 +52,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define WINDIVERT_KERNEL
+
 #include "windivert.h"
 
+/*
 #define ntohs(x)            WinDivertHelperNtohs(x)
 #define ntohl(x)            WinDivertHelperNtohl(x)
 #define htons(x)            WinDivertHelperHtons(x)
 #define htonl(x)            WinDivertHelperHtonl(x)
+*/
 
 #define MAXBUF              0xFFFF
 #define INET6_ADDRSTRLEN    45
@@ -92,6 +96,12 @@ typedef struct
     UINT8 data[];
 } ICMPV6PACKET, *PICMPV6PACKET;
 
+typedef struct
+{
+	WINDIVERT_IPHDR ip;
+	WINDIVERT_UDPHDR udp;
+} UDPIPV4PACKET, *PUDPIPV4PACKET;
+
 /*
  * Prototypes.
  */
@@ -102,58 +112,237 @@ static void PacketIpv6Init(PWINDIVERT_IPV6HDR packet);
 static void PacketIpv6TcpInit(PTCPV6PACKET packet);
 static void PacketIpv6Icmpv6Init(PICMPV6PACKET packet);
 
+#include "winsock.h"
+
 /*
  * Entry.
  */
 int __cdecl main(int argc, char **argv)
 {
-    HANDLE handle, console;
-    UINT i;
-    INT16 priority = 0;
-    unsigned char packet[MAXBUF];
-    UINT packet_len;
-    WINDIVERT_ADDRESS recv_addr, send_addr;
-    PWINDIVERT_IPHDR ip_header;
-    PWINDIVERT_IPV6HDR ipv6_header;
-    PWINDIVERT_ICMPHDR icmp_header;
-    PWINDIVERT_ICMPV6HDR icmpv6_header;
-    PWINDIVERT_TCPHDR tcp_header;
-    PWINDIVERT_UDPHDR udp_header;
-    UINT32 src_addr[4], dst_addr[4];
-    char src_str[INET6_ADDRSTRLEN+1], dst_str[INET6_ADDRSTRLEN+1];
-    UINT payload_len;
-    const char *err_str;
-    
-    TCPPACKET reset0;
-    PTCPPACKET reset = &reset0;
-    UINT8 dnr0[sizeof(ICMPPACKET) + 0x0F*sizeof(UINT32) + 8 + 1];
-    PICMPPACKET dnr = (PICMPPACKET)dnr0;
+	HANDLE handle, console;
+	UINT i = 0;
+	INT16 priority = 0;
+	unsigned char packet[MAXBUF];
+	UINT packet_len;
+	WINDIVERT_ADDRESS recv_addr, send_addr, swap_addr;
+	PWINDIVERT_IPHDR ip_header;
+	PWINDIVERT_IPV6HDR ipv6_header;
+	PWINDIVERT_ICMPHDR icmp_header;
+	PWINDIVERT_ICMPV6HDR icmpv6_header;
+	PWINDIVERT_TCPHDR tcp_header;
+	PWINDIVERT_UDPHDR udp_header;
+	UINT32 src_addr[4], dst_addr[4];
+	char src_str[INET6_ADDRSTRLEN + 1], dst_str[INET6_ADDRSTRLEN + 1];
+	UINT payload_len;
+	const char *err_str;
 
-    TCPV6PACKET resetv6_0;
-    PTCPV6PACKET resetv6 = &resetv6_0;
-    UINT8 dnrv6_0[sizeof(ICMPV6PACKET) + sizeof(WINDIVERT_IPV6HDR) +
-        sizeof(WINDIVERT_TCPHDR)];
-    PICMPV6PACKET dnrv6 = (PICMPV6PACKET)dnrv6_0;
+	TCPPACKET reset0;
+	PTCPPACKET reset = &reset0;
+	UINT8 dnr0[sizeof(ICMPPACKET) + 0x0F * sizeof(UINT32) + 8 + 1];
+	PICMPPACKET dnr = (PICMPPACKET)dnr0;
 
-    // Check arguments.
-    switch (argc)
-    {
-        case 2:
-            break;
-        case 3:
-            priority = (INT16)atoi(argv[2]);
-            break;
-        default:
-            fprintf(stderr, "usage: %s windivert-filter [priority]\n",
-                argv[0]);
-            fprintf(stderr, "examples:\n");
-            fprintf(stderr, "\t%s true\n", argv[0]);
-            fprintf(stderr, "\t%s \"outbound and tcp.DstPort == 80\" 1000\n",
-                argv[0]);
-            fprintf(stderr, "\t%s \"inbound and tcp.Syn\" -400\n", argv[0]);
-            exit(EXIT_FAILURE);
-    }
+	TCPV6PACKET resetv6_0;
+	PTCPV6PACKET resetv6 = &resetv6_0;
+	UINT8 dnrv6_0[sizeof(ICMPV6PACKET) + sizeof(WINDIVERT_IPV6HDR) +
+		sizeof(WINDIVERT_TCPHDR)];
+	PICMPV6PACKET dnrv6 = (PICMPV6PACKET)dnrv6_0;
 
+	// Check arguments.
+
+	char reflectAddress[32];
+	int verbose = FALSE;
+	int port = -1;
+
+	while (++i < argc)
+	{
+		if (!_stricmp(argv[i], "-reflect_address"))
+		{
+			strcpy_s(reflectAddress, sizeof(reflectAddress) - 1, argv[++i]);
+		}
+		else if (!_stricmp(argv[i], "-verbose"))
+		{
+			verbose = TRUE;
+		}
+		else if (!_stricmp(argv[i], "-shield"))
+		{
+			port = atoi(argv[++i]);
+		}
+	}
+
+	if (strlen(reflectAddress) < 8)
+	{
+		fprintf(stderr, "need to specify a reflect address\n");
+		exit(EXIT_FAILURE);
+	}
+	if (port < 0)
+	{
+	}
+
+	char filterString[256];
+
+	sprintf_s(filterString, sizeof(filterString) - 1, "outbound and ip.DstAddr == %s",
+		reflectAddress);
+
+	char work_string[256];
+
+	if (port > 0)
+	{
+		sprintf_s(work_string, sizeof(work_string) - 1, "or inbound and tcp.DstPort == %i", port);
+		sprintf_s(filterString, sizeof(filterString) - 1, "%s %s", filterString, work_string);
+	}
+
+	printf("NetReflect (WinDivert): reflecting packets with filter %s (%s)\n", filterString,
+						verbose ? "with tracing on" : "quietly");
+
+	handle = WinDivertOpen(filterString, WINDIVERT_LAYER_NETWORK, 0, 0);
+	if (handle == INVALID_HANDLE_VALUE)
+	{
+		if (GetLastError() == ERROR_INVALID_PARAMETER )  
+			/* &&
+			!WinDivertHelperCompileFilter(filterString, WINDIVERT_LAYER_NETWORK,
+				NULL, 0, &err_str, NULL)) */
+		{
+			fprintf(stderr, "error: invalid filter \"%s\"\n", filterString);
+			exit(EXIT_FAILURE);
+		}
+		fprintf(stderr, "error: failed to open the WinDivert device (%d)\n",
+			GetLastError());
+		exit(EXIT_FAILURE);
+	}
+
+	// Main loop:
+	int readPackets = 0;
+	int sentPackets = 0;
+	int readErrors = 0;
+	int sendErrors = 0;
+	int sent_len = 0;
+	__int64 readBytes = 0;
+	__int64 sentBytes = 0;
+
+	while (TRUE)
+	{
+		// Read a matching packet.
+		if (!WinDivertRecv(handle, packet, sizeof(packet), &recv_addr,
+			&packet_len))
+		{
+			fprintf(stderr, "warning: failed to read packet\n");
+			readErrors++;
+
+			continue;
+		}
+		else
+		{
+			readPackets++;
+			readBytes += packet_len;
+		}
+		
+		if (verbose)
+		{
+			// Print info about the matching packet.
+			WinDivertHelperParsePacket(packet, packet_len, &ip_header,
+				&ipv6_header, &icmp_header, &icmpv6_header, &tcp_header,
+				&udp_header, NULL, &payload_len);
+			if (ip_header == NULL && ipv6_header == NULL)
+			{
+				continue;
+			}
+
+			if (ip_header != NULL)
+			{
+				struct in_addr Src, Dst;
+				Src.S_un.S_addr = ip_header->SrcAddr;
+				Dst.S_un.S_addr = ip_header->DstAddr;
+
+				char *SrcAddr, *DstAddr;
+				SrcAddr = inet_ntoa(Src);
+				DstAddr = inet_ntoa(Dst);
+
+				printf("ip.SrcAddr=%s ip.DstAddr=%s ", SrcAddr, DstAddr);
+			}
+
+			if (udp_header != NULL)
+			{
+				printf("udp.SrcPort=%u udp.DstPort=%u, %u bytes\n",
+					ntohs(udp_header->SrcPort), ntohs(udp_header->DstPort),
+					ntohs(udp_header->Length));
+
+			}
+		}
+
+
+		// swap send and receive address
+		memcpy(&send_addr, &recv_addr, sizeof(send_addr));
+		send_addr.Direction = !recv_addr.Direction;
+
+		// this could be more efficient, but for now we want to trace it easily.		
+		PUDPIPV4PACKET pRecv_header = packet;
+		UDPIPV4PACKET send_header;
+
+		// copy to the send header
+		memcpy(&send_header, pRecv_header, sizeof(UDPIPV4PACKET));
+		// swap the source and destination addresses.
+		send_header.ip.DstAddr = pRecv_header->ip.SrcAddr;
+		send_header.ip.SrcAddr = pRecv_header->ip.DstAddr;
+
+		// copy the temp header back into the packet
+		memcpy(pRecv_header, &send_header, sizeof(UDPIPV4PACKET));
+
+		int cc_count = WinDivertHelperCalcChecksums((PVOID)packet, packet_len, &send_addr, 0);
+
+		int sent_len = -1;
+		int stat = WinDivertSend(handle, (PVOID)packet, packet_len,
+			&send_addr, &sent_len);
+
+		if (!stat)
+		{
+			fprintf(stderr, "error sending packet for reflection (return:%d last error:%d)\n  ", stat,
+				GetLastError());
+			sendErrors++;
+		}
+		else
+		{
+			if (verbose)
+			{
+				printf("reflect: %d bytes\n", sent_len);
+			}
+
+			sentPackets++;
+			sentBytes += sent_len;
+		}
+
+		if (!(readPackets % 1000))
+		{
+			sprintf_s(work_string, sizeof(work_string) - 1, "%i packets read, %I64d total bytes",
+								readPackets, readBytes);
+
+			printf( "%s, %i packets reflected, %I64d total bytes\n", work_string, sentPackets, sentBytes);
+		}
+	}
+}
+
+
+#if 0
+
+            if packet.is_outbound:
+                (packet.src_addr, packet.dst_addr) = \
+                    (packet.dst_addr, packet.src_addr)
+                packet.direction = pydivert.Direction.INBOUND
+                logger.debug('Reflecting packet:\n%r', packet)
+                wd.send(packet)
+
+		    else:
+                logger.debug('Dropping packet
+					reflect(args.reflect_address, args.shield, args.priority)
+					except PermissionError as e :
+				sys.exit(f'Caught PermissionError: are you running this program '
+					f'with Administrator privileges?\n{e!r}')* /
+
+					*/
+
+#endif
+
+
+#if 0
     // Initialize all packets.
     PacketIpTcpInit(reset);
     reset->tcp.Rst = 1;
@@ -230,6 +419,7 @@ int __cdecl main(int argc, char **argv)
             WinDivertHelperFormatIPv6Address(dst_addr, dst_str,
                 sizeof(dst_str));
         }
+
         printf("ip.SrcAddr=%s ip.DstAddr=%s ", src_str, dst_str);
         if (icmp_header != NULL)
         {
@@ -243,6 +433,7 @@ int __cdecl main(int argc, char **argv)
                 icmpv6_header->Type, icmpv6_header->Code);
             // Simply drop ICMPv6
         }
+
         if (tcp_header != NULL)
         {
             printf("tcp.SrcPort=%u tcp.DstPort=%u tcp.Flags=",
@@ -288,7 +479,7 @@ int __cdecl main(int argc, char **argv)
                         htonl(ntohl(tcp_header->SeqNum) + payload_len));
 
                 memcpy(&send_addr, &recv_addr, sizeof(send_addr));
-                send_addr.Outbound = !recv_addr.Outbound;
+                send_addr.Direction = !recv_addr.Direction;
                 WinDivertHelperCalcChecksums((PVOID)reset, sizeof(TCPPACKET),
                     &send_addr, 0);
                 if (!WinDivertSend(handle, (PVOID)reset, sizeof(TCPPACKET),
@@ -315,7 +506,7 @@ int __cdecl main(int argc, char **argv)
                         htonl(ntohl(tcp_header->SeqNum) + payload_len));
 
                 memcpy(&send_addr, &recv_addr, sizeof(send_addr));
-                send_addr.Outbound = !recv_addr.Outbound;
+                send_addr.Direction = !recv_addr.Direction;
                 WinDivertHelperCalcChecksums((PVOID)resetv6,
                     sizeof(TCPV6PACKET), &send_addr, 0);
                 if (!WinDivertSend(handle, (PVOID)resetv6, sizeof(TCPV6PACKET),
@@ -326,6 +517,7 @@ int __cdecl main(int argc, char **argv)
                 }
             }
         }
+
         if (udp_header != NULL)
         {
             printf("udp.SrcPort=%u udp.DstPort=%u ",
@@ -341,7 +533,7 @@ int __cdecl main(int argc, char **argv)
                 dnr->ip.DstAddr = ip_header->SrcAddr;
                 
                 memcpy(&send_addr, &recv_addr, sizeof(send_addr));
-                send_addr.Outbound = !recv_addr.Outbound;
+                send_addr.Direction = !recv_addr.Direction;
                 WinDivertHelperCalcChecksums((PVOID)dnr, icmp_length,
                     &send_addr, 0);
                 if (!WinDivertSend(handle, (PVOID)dnr, icmp_length, &send_addr,
@@ -364,7 +556,7 @@ int __cdecl main(int argc, char **argv)
                     sizeof(dnrv6->ipv6.DstAddr));
                 
                 memcpy(&send_addr, &recv_addr, sizeof(send_addr));
-                send_addr.Outbound = !recv_addr.Outbound;
+                send_addr.Direction = !recv_addr.Direction;
                 WinDivertHelperCalcChecksums((PVOID)dnrv6, icmpv6_length,
                     &send_addr, 0);
                 if (!WinDivertSend(handle, (PVOID)dnrv6, icmpv6_length,
@@ -376,8 +568,9 @@ int __cdecl main(int argc, char **argv)
             }
         }
         putchar('\n');
-    }
-}
+
+#endif
+
 
 /*
  * Initialize a PACKET.
