@@ -169,9 +169,9 @@ int __cdecl main(int argc, char **argv)
 		}
 	}
 
-	if (strlen(reflectAddress) < 8)
+	if (strlen(reflectAddress) < 6)
 	{
-		fprintf(stderr, "need to specify a reflect address\n");
+		fprintf(stderr, "need to specify a reflect address\n  -reflect_address n.n.n.n");
 		exit(EXIT_FAILURE);
 	}
 	if (port < 0)
@@ -202,10 +202,12 @@ int __cdecl main(int argc, char **argv)
 			!WinDivertHelperCompileFilter(filterString, WINDIVERT_LAYER_NETWORK,
 				NULL, 0, &err_str, NULL)) */
 		{
-			fprintf(stderr, "error: invalid filter \"%s\"\n", filterString);
+			fprintf(stderr, "error: invalid filter? \"%s\"\n   Or could be that there is 32/64 bit mismatch", filterString);
 			exit(EXIT_FAILURE);
 		}
-		fprintf(stderr, "error: failed to open the WinDivert device (%d)\n",
+
+		fprintf(stderr, 
+			"error: failed to open the WinDivert device (%d)\n    NetReflect requires admin priv\n",
 			GetLastError());
 		exit(EXIT_FAILURE);
 	}
